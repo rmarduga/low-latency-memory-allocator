@@ -73,7 +73,7 @@ public:
         
         if (!capacity)
         {
-            allocateUsingStdAllocator(object, std::forward(args) ...);
+            allocateUsingStdAllocator(object, std::forward<ARGS>(args) ...);
             return;
         }
         bool useStandardAllocator = false;
@@ -96,7 +96,7 @@ public:
         } while(false);
 
         if (useStandardAllocator) {
-            allocateUsingStdAllocator(object, std::forward(args) ...);
+            allocateUsingStdAllocator(object, std::forward<ARGS>(args) ...);
             return;
         }
 
@@ -104,7 +104,7 @@ public:
         if (isActivateReplenish) {
             runReplenish();
         }
-        object = std::shared_ptr<OBJECT>( new (chunkToUse->data) OBJECT(std::forward(args) ... )
+        object = std::shared_ptr<OBJECT>( new (chunkToUse->data) OBJECT(std::forward<ARGS>(args) ... )
                                           , [this](OBJECT* pObject) {this->dealloc(pObject);}
         );
     }
