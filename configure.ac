@@ -19,5 +19,6 @@ LT_INIT
 
 AC_CONFIG_FILES(Makefile
                 test/Makefile
-                include/Makefile)
+                include/Makefile
+                src/Makefile)
 AC_OUTPUT

@@ -15,6 +15,9 @@
 #include <csignal>
 #include <functional>
 #include <stddef.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 
 #include "object_pool.hpp"
@@ -70,7 +73,6 @@ public:
     void threadFunction(size_t objectListSizePerThread, int threadId) {
         {
             std::unique_lock<std::mutex> lk(m);
-            std::lock_guard<std::mutex> lkGuard(m, std::adopt_lock);
             cv.wait(lk, [this]{return isRunning;});
         }
         doThreadFunction(objectListSizePerThread, threadId);

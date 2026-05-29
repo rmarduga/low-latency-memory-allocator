@@ -7,7 +7,7 @@
 # Because a.out is only a sample program we don't want it to be installed.
 # The 'noinst_' prefix indicates that the following targets are not to be
 # installed.
-noinst_PROGRAMS=low_latency_object_pool_test
+noinst_PROGRAMS=low_latency_object_pool_test object_pool_test
 
 #######################################
 # Build information for each executable. The variable name is derived
@@ -17,16 +17,26 @@ noinst_PROGRAMS=low_latency_object_pool_test
 
 ACLOCAL_AMFLAGS=-I ../m4
 
-# Sources for the a.out 
+# Sources for the low_latency_object_pool_test
 low_latency_object_pool_test_SOURCES = low_latency_object_pool_test.cpp
 
-# Libraries for a.out
-#low_latency_object_pool_test_LDADD = $(top_srcdir)/libllmaloc/libllmaloc.la
-low_latency_object_pool_test_LDADD =
+# Libraries for low_latency_object_pool_test
+low_latency_object_pool_test_LDADD = $(top_srcdir)/src/libobjectpool.la
 
-# Linker options for a.out
-# low_latency_object_pool_test_LDFLAGS = -rpath `cd $(top_srcdir);pwd`/libllmaloc/.libs
-low_latency_object_pool_test_LDFLAGS = -lpthread
+# Linker options for low_latency_object_pool_test
+low_latency_object_pool_test_LDFLAGS = -lpthread -rpath `cd $(top_srcdir);pwd`/src/.libs
 
-# Compiler options for a.out
+# Compiler options for low_latency_object_pool_test
 low_latency_object_pool_test_CPPFLAGS = -I$(top_srcdir)/include -std=c++1y
+
+# Sources for the object_pool_test (gtest)
+object_pool_test_SOURCES = object_pool_test.cpp
+
+# Libraries for object_pool_test
+object_pool_test_LDADD = $(top_srcdir)/src/libobjectpool.la -lgtest -lgtest_main
+
+# Linker options for object_pool_test
+object_pool_test_LDFLAGS = -lpthread -rpath `cd $(top_srcdir);pwd`/src/.libs
+
+# Compiler options for object_pool_test
+object_pool_test_CPPFLAGS = -I$(top_srcdir)/include -std=c++1y
