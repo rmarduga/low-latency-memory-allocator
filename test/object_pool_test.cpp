@@ -14,7 +14,7 @@
 #include <condition_variable>
 #include <chrono>
 
-#include "object_pool.hpp"
+#include "object_pool_impl.hpp"
 
 struct MyClass {
     int64_t int64Array[4];  // 32 bytes
@@ -33,10 +33,14 @@ struct MyClass {
         for (int i = 0; i < 8; ++i) int32Array[i] = val;
         for (int i = 0; i < 16; ++i) int16Array[i] = val;
     }
+    
+    ~MyClass() {
+        int32 = -1; // Mark as destroyed
+    }
 };
 
-// Test fixture for ObjectPool tests
-class ObjectPoolTest : public ::testing::Test {
+// Test fixture for ObjectPoolImpl tests
+class ObjectPoolImplTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Default setup
@@ -47,100 +51,99 @@ protected:
     }
 };
 
-// Basic functionality tests
-TEST_F(ObjectPoolTest, BasicAllocDealloc) {
-    ObjectPool<sizeof(MyClass)> pool(100, 10);
-    std::shared_ptr<MyClass> obj;
+// Basic functionality tests for ObjectPoolImpl
+TEST_F(ObjectPoolImplTest, BasicAllocateDeallocate) {
+    ObjectPoolImpl pool(sizeof(MyClass), 100, 10);
     
-    pool.alloc(obj);
-    ASSERT_NE(obj, nullptr);
+    void* chunk = pool.allocate();
+    ASSERT_NE(chunk, nullptr);
+    
+    // Construct object in the chunk
+    MyClass* obj = new (chunk) MyClass();
     EXPECT_EQ(obj->int32, 42);
     
-    // Object should be automatically deallocated when shared_ptr goes out of scope
+    // Destroy and deallocate
+    obj->~MyClass();
+    pool.deallocate(chunk);
 }
 
-TEST_F(ObjectPoolTest, AllocWithArgs) {
-    ObjectPool<sizeof(MyClass)> pool(100, 10);
-    std::shared_ptr<MyClass> obj;
+TEST_F(ObjectPoolImplTest, AllocateWithConstruction) {
+    ObjectPoolImpl pool(sizeof(MyClass), 100, 10);
     
-    pool.alloc(obj, 123);
-    ASSERT_NE(obj, nullptr);
+    void* chunk = pool.allocate();
+    ASSERT_NE(chunk, nullptr);
+    
+    MyClass* obj = new (chunk) MyClass(123);
     EXPECT_EQ(obj->int32, 123);
     EXPECT_EQ(obj->int64Array[0], 123);
+    
+    obj->~MyClass();
+    pool.deallocate(chunk);
 }
 
-TEST_F(ObjectPoolTest, MultipleAllocs) {
-    ObjectPool<sizeof(MyClass)> pool(10, 2);
-    std::vector<std::shared_ptr<MyClass>> objects;
+TEST_F(ObjectPoolImplTest, MultipleAllocations) {
+    ObjectPoolImpl pool(sizeof(MyClass), 10, 2);
+    std::vector<void*> chunks;
+    std::vector<MyClass*> objects;
     
     for (int i = 0; i < 10; ++i) {
-        std::shared_ptr<MyClass> obj;
-        pool.alloc(obj, i);
-        ASSERT_NE(obj, nullptr);
+        void* chunk = pool.allocate();
+        ASSERT_NE(chunk, nullptr);
+        MyClass* obj = new (chunk) MyClass(i);
         EXPECT_EQ(obj->int32, i);
+        chunks.push_back(chunk);
         objects.push_back(obj);
     }
     
-    // All objects should be valid
-    for (int i = 0; i < 10; ++i) {
-        EXPECT_EQ(objects[i]->int32, i);
+    // Cleanup
+    for (size_t i = 0; i < objects.size(); ++i) {
+        objects[i]->~MyClass();
+        pool.deallocate(chunks[i]);
     }
 }
 
-TEST_F(ObjectPoolTest, PoolExhaustionFallback) {
+TEST_F(ObjectPoolImplTest, PoolExhaustionReturnsNull) {
     // Create a pool with capacity 2
-    ObjectPool<sizeof(MyClass)> pool(2, 1);
-    std::vector<std::shared_ptr<MyClass>> objects;
+    ObjectPoolImpl pool(sizeof(MyClass), 2, 1);
     
-    // Allocate 5 objects (more than capacity)
-    // The pool should fallback to std allocator for excess
-    for (int i = 0; i < 5; ++i) {
-        std::shared_ptr<MyClass> obj;
-        pool.alloc(obj, i);
-        ASSERT_NE(obj, nullptr);
-        EXPECT_EQ(obj->int32, i);
-        objects.push_back(obj);
-    }
+    void* chunk1 = pool.allocate();
+    void* chunk2 = pool.allocate();
+    void* chunk3 = pool.allocate(); // Should return nullptr (pool exhausted)
+    
+    ASSERT_NE(chunk1, nullptr);
+    ASSERT_NE(chunk2, nullptr);
+    EXPECT_EQ(chunk3, nullptr);
+    
+    // Cleanup
+    pool.deallocate(chunk1);
+    pool.deallocate(chunk2);
 }
 
-TEST_F(ObjectPoolTest, ObjectSizeCheck) {
-    // This should compile - MyClass fits in pool
-    ObjectPool<sizeof(MyClass)> pool1(10, 2);
-    std::shared_ptr<MyClass> obj1;
-    pool1.alloc(obj1);
-    EXPECT_NE(obj1, nullptr);
+TEST_F(ObjectPoolImplTest, ReuseAfterDeallocate) {
+    ObjectPoolImpl pool(sizeof(MyClass), 5, 2);
     
-    // Pool with smaller size should still work for smaller objects
-    struct SmallClass {
-        int x;
-    };
-    ObjectPool<sizeof(SmallClass)> pool2(10, 2);
-    std::shared_ptr<SmallClass> obj2;
-    pool2.alloc(obj2);
-    EXPECT_NE(obj2, nullptr);
-}
-
-TEST_F(ObjectPoolTest, ReuseAfterDealloc) {
-    ObjectPool<sizeof(MyClass)> pool(5, 2);
-    
-    {
-        std::shared_ptr<MyClass> obj1;
-        pool.alloc(obj1, 100);
-        ASSERT_NE(obj1, nullptr);
-        EXPECT_EQ(obj1->int32, 100);
-        // obj1 goes out of scope here, should be returned to pool
-    }
+    void* chunk1 = pool.allocate();
+    ASSERT_NE(chunk1, nullptr);
+    MyClass* obj1 = new (chunk1) MyClass(100);
+    EXPECT_EQ(obj1->int32, 100);
+    obj1->~MyClass();
+    pool.deallocate(chunk1);
     
     // Allocate again - should reuse the freed chunk
-    std::shared_ptr<MyClass> obj2;
-    pool.alloc(obj2, 200);
-    ASSERT_NE(obj2, nullptr);
+    void* chunk2 = pool.allocate();
+    ASSERT_NE(chunk2, nullptr);
+    // The chunk address should be the same (reused)
+    EXPECT_EQ(chunk1, chunk2);
+    
+    MyClass* obj2 = new (chunk2) MyClass(200);
     EXPECT_EQ(obj2->int32, 200);
+    obj2->~MyClass();
+    pool.deallocate(chunk2);
 }
 
-// Multithreaded tests
-TEST_F(ObjectPoolTest, MultithreadedSameThreadAllocDealloc) {
-    ObjectPool<sizeof(MyClass)> pool(1000, 100);
+// Multithreaded tests for ObjectPoolImpl
+TEST_F(ObjectPoolImplTest, MultithreadedAllocateDeallocate) {
+    ObjectPoolImpl pool(sizeof(MyClass), 1000, 100);
     const int numThreads = 4;
     const int allocsPerThread = 1000;
     std::vector<std::thread> threads;
@@ -149,12 +152,15 @@ TEST_F(ObjectPoolTest, MultithreadedSameThreadAllocDealloc) {
     for (int t = 0; t < numThreads; ++t) {
         threads.emplace_back([&pool, allocsPerThread, &successCount, t]() {
             for (int i = 0; i < allocsPerThread; ++i) {
-                std::shared_ptr<MyClass> obj;
-                pool.alloc(obj, t * 1000 + i);
-                if (obj && obj->int32 == t * 1000 + i) {
-                    successCount++;
+                void* chunk = pool.allocate();
+                if (chunk) {
+                    MyClass* obj = new (chunk) MyClass(t * 1000 + i);
+                    if (obj->int32 == t * 1000 + i) {
+                        successCount++;
+                    }
+                    obj->~MyClass();
+                    pool.deallocate(chunk);
                 }
-                // obj automatically deallocated here
             }
         });
     }
@@ -166,25 +172,25 @@ TEST_F(ObjectPoolTest, MultithreadedSameThreadAllocDealloc) {
     EXPECT_EQ(successCount, numThreads * allocsPerThread);
 }
 
-TEST_F(ObjectPoolTest, MultithreadedCrossThreadDealloc) {
-    ObjectPool<sizeof(MyClass)> pool(1000, 100);
+TEST_F(ObjectPoolImplTest, MultithreadedCrossThreadDealloc) {
+    ObjectPoolImpl pool(sizeof(MyClass), 1000, 100);
     const int numThreads = 4;
     const int allocsPerThread = 100;
     std::vector<std::thread> threads;
-    std::vector<std::shared_ptr<MyClass>> sharedObjects;
-    std::mutex objectsMutex;
+    std::vector<void*> sharedChunks;
+    std::mutex chunksMutex;
     std::atomic<int> allocCount{0};
     
     // Allocate in multiple threads
     for (int t = 0; t < numThreads; ++t) {
-        threads.emplace_back([&pool, &sharedObjects, &objectsMutex, &allocCount, t, allocsPerThread]() {
+        threads.emplace_back([&pool, &sharedChunks, &chunksMutex, &allocCount, t, allocsPerThread]() {
             for (int i = 0; i < allocsPerThread; ++i) {
-                std::shared_ptr<MyClass> obj;
-                pool.alloc(obj, t * 1000 + i);
-                if (obj) {
+                void* chunk = pool.allocate();
+                if (chunk) {
+                    MyClass* obj = new (chunk) MyClass(t * 1000 + i);
                     {
-                        std::lock_guard<std::mutex> lock(objectsMutex);
-                        sharedObjects.push_back(obj);
+                        std::lock_guard<std::mutex> lock(chunksMutex);
+                        sharedChunks.push_back(chunk);
                     }
                     allocCount++;
                 }
@@ -198,40 +204,49 @@ TEST_F(ObjectPoolTest, MultithreadedCrossThreadDealloc) {
     
     EXPECT_EQ(allocCount, numThreads * allocsPerThread);
     
-    // Clear objects (dealloc in main thread, different from alloc threads)
-    sharedObjects.clear();
+    // Deallocate all chunks in main thread (different from alloc threads)
+    for (void* chunk : sharedChunks) {
+        MyClass* obj = static_cast<MyClass*>(chunk);
+        obj->~MyClass();
+        pool.deallocate(chunk);
+    }
 }
 
-// Performance tests (informational, not asserting on performance)
-TEST_F(ObjectPoolTest, PerformanceComparison) {
+// Performance tests comparing std::allocator vs ObjectPoolImpl
+TEST_F(ObjectPoolImplTest, PerformanceComparison) {
     const int numIterations = 10000;
     
-    // Test standard allocator
+    // Test std::allocator (not make_shared)
+    std::allocator<MyClass> stdAllocator;
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < numIterations; ++i) {
-        auto obj = std::make_shared<MyClass>(i);
-        (void)obj;
+        MyClass* obj = stdAllocator.allocate(1);
+        stdAllocator.construct(obj, i);
+        stdAllocator.destroy(obj);
+        stdAllocator.deallocate(obj, 1);
     }
     auto end = std::chrono::high_resolution_clock::now();
     auto stdAllocTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     
-    // Test object pool
-    ObjectPool<sizeof(MyClass)> pool(numIterations, numIterations / 10);
+    // Test ObjectPoolImpl
+    ObjectPoolImpl pool(sizeof(MyClass), numIterations, numIterations / 10);
     start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < numIterations; ++i) {
-        std::shared_ptr<MyClass> obj;
-        pool.alloc(obj, i);
-        (void)obj;
+        void* chunk = pool.allocate();
+        if (chunk) {
+            MyClass* obj = new (chunk) MyClass(i);
+            obj->~MyClass();
+            pool.deallocate(chunk);
+        }
     }
     end = std::chrono::high_resolution_clock::now();
     auto poolAllocTime = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     
     // Output performance info (not a failure condition)
-    std::cout << "Standard allocator time: " << stdAllocTime << " μs\n";
-    std::cout << "Object pool time: " << poolAllocTime << " μs\n";
+    std::cout << "std::allocator time: " << stdAllocTime << " μs\n";
+    std::cout << "ObjectPoolImpl time: " << poolAllocTime << " μs\n";
     
-    // Pool should generally be faster or comparable (but don't fail test on this)
-    // Just ensure both completed successfully
+    // Both should complete successfully
     EXPECT_GT(stdAllocTime, 0);
     EXPECT_GT(poolAllocTime, 0);
 }

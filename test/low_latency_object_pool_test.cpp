@@ -20,13 +20,16 @@
 #include <condition_variable>
 
 
-#include "object_pool.hpp"
+#include "object_pool_impl.hpp"
 
 struct MyClass{
     int64_t int64Array[4];  // 32 bytes
     int32_t int32Array[8];  // 64 bytes
     int16_t int16Array[16]; // 96 bytes
     int32_t int32;          // 104 bytes (+4 bytes padding)
+    
+    MyClass() : int32(42) {}
+    ~MyClass() {}
 };
 typedef std::chrono::duration<int64_t> duration;
 struct LatencyResult{
@@ -45,7 +48,7 @@ public:
     AbstructTest(size_t threadCount, size_t maxCapacity, size_t minCapacity) :
         threadCount(threadCount),
         results(threadCount),
-        objectPool(maxCapacity, minCapacity) {
+        objectPool(sizeof(MyClass), maxCapacity, minCapacity) {
     }
     virtual ~AbstructTest() {}
     void start() {
@@ -184,8 +187,8 @@ protected:
     size_t threadCount;
     std::vector<std::pair<LatencyResult, LatencyResult>> results;
     const size_t totalNumberOfObjects = 1000000;
-    ObjectPool<sizeof(MyClass)> objectPool;
-    typedef std::shared_ptr<MyClass> ObjectPtr;
+    ObjectPoolImpl objectPool;
+    typedef MyClass* ObjectPtr;
     typedef std::vector<ObjectPtr> ObjectPtrList;
     size_t numberOfThreadsThatFinishedAllocation = 0;
     std::mutex m;
@@ -206,18 +209,24 @@ struct SystemAllocatorTest : public AbstructTest<SystemAllocatorTest> {
     }
 
     void doAllocImpl(int threadId) {
-        objectListPerThread[threadId].push_back( std::make_shared<MyClass>() );
+        MyClass* obj = stdAllocator.allocate(1);
+        stdAllocator.construct(obj);
+        objectListPerThread[threadId].push_back(obj);
     }
 
     void doPreDeallocInitImpl(int threadId) {}
 
 
     void doDeallocImpl(int threadId) {
+        MyClass* obj = objectListPerThread[threadId].back();
         objectListPerThread[threadId].pop_back();
+        stdAllocator.destroy(obj);
+        stdAllocator.deallocate(obj, 1);
     }
 
 private:
     std::vector<ObjectPtrList> objectListPerThread;
+    std::allocator<MyClass> stdAllocator;
 };
 
 
@@ -225,27 +234,51 @@ struct AllocationAndDeallocationInSameThreadsTest : public AbstructTest<Allocati
     AllocationAndDeallocationInSameThreadsTest(size_t threadCount, size_t maxCapacity, size_t minCapacity) :
         AbstructTest(threadCount, maxCapacity, minCapacity)
       , objectListPerThread(threadCount)
+      , isFromPoolPerThread(threadCount)
     {
 
     }
 
     void doInitImpl(size_t objectListSizePerThread, int threadId) {
         objectListPerThread[threadId].reserve(objectListSizePerThread);
+        isFromPoolPerThread[threadId].reserve(objectListSizePerThread);
     }
 
     void doAllocImpl(int threadId) {
-        ObjectPtr objectPtr;
-        objectPool.alloc(objectPtr);
-        objectListPerThread[threadId].push_back( std::move(objectPtr) );
+        void* chunk = objectPool.allocate();
+        if (chunk) {
+            MyClass* obj = new (chunk) MyClass();
+            objectListPerThread[threadId].push_back(obj);
+            isFromPoolPerThread[threadId].push_back(true);
+        } else {
+            // Fallback to std allocator when pool exhausted
+            MyClass* obj = stdAllocator.allocate(1);
+            stdAllocator.construct(obj);
+            objectListPerThread[threadId].push_back(obj);
+            isFromPoolPerThread[threadId].push_back(false);
+        }
     }
 
     void doPreDeallocInitImpl(int threadId) {}
 
     void doDeallocImpl(int threadId) {
+        MyClass* obj = objectListPerThread[threadId].back();
+        bool isFromPool = isFromPoolPerThread[threadId].back();
         objectListPerThread[threadId].pop_back();
+        isFromPoolPerThread[threadId].pop_back();
+        
+        if (isFromPool) {
+            obj->~MyClass();
+            objectPool.deallocate(obj);
+        } else {
+            stdAllocator.destroy(obj);
+            stdAllocator.deallocate(obj, 1);
+        }
     }
 private:
     std::vector<ObjectPtrList> objectListPerThread;
+    std::vector<std::vector<bool>> isFromPoolPerThread;
+    std::allocator<MyClass> stdAllocator;
 };
 
 
@@ -254,18 +287,29 @@ public:
     AllocationAndDeallocationInDifferentThreadsTest(size_t threadCount, size_t maxCapacity, size_t minCapacity) :
         AbstructTest(threadCount, maxCapacity, minCapacity)
         , objectListPerThread(threadCount)
+        , isFromPoolPerThread(threadCount)
     {
 
     }
 
     void doInitImpl(size_t objectListSizePerThread, int threadId) {
         objectListPerThread[threadId].reserve(objectListSizePerThread);
+        isFromPoolPerThread[threadId].reserve(objectListSizePerThread);
     }
 
     void doAllocImpl(int threadId) {
-        ObjectPtr objectPtr;
-        objectPool.alloc(objectPtr);
-        objectListPerThread[threadId].push_back( std::move(objectPtr) );
+        void* chunk = objectPool.allocate();
+        if (chunk) {
+            MyClass* obj = new (chunk) MyClass();
+            objectListPerThread[threadId].push_back(obj);
+            isFromPoolPerThread[threadId].push_back(true);
+        } else {
+            // Fallback to std allocator when pool exhausted
+            MyClass* obj = stdAllocator.allocate(1);
+            stdAllocator.construct(obj);
+            objectListPerThread[threadId].push_back(obj);
+            isFromPoolPerThread[threadId].push_back(false);
+        }
     }
 
     void doPreDeallocInitImpl(int threadId) {
@@ -274,11 +318,25 @@ public:
 
     void doDeallocImpl(int threadId) {
         auto& objectList = objectListPerThread[(threadId + 1) % threadCount];
+        auto& isFromPoolList = isFromPoolPerThread[(threadId + 1) % threadCount];
         if (objectList.empty()) return;
+        MyClass* obj = objectList.back();
+        bool isFromPool = isFromPoolList.back();
         objectList.pop_back();
+        isFromPoolList.pop_back();
+        
+        if (isFromPool) {
+            obj->~MyClass();
+            objectPool.deallocate(obj);
+        } else {
+            stdAllocator.destroy(obj);
+            stdAllocator.deallocate(obj, 1);
+        }
     }
 private:
     std::vector<ObjectPtrList> objectListPerThread;
+    std::vector<std::vector<bool>> isFromPoolPerThread;
+    std::allocator<MyClass> stdAllocator;
 };
 
 
@@ -314,14 +372,14 @@ int main (int argc, char *argv[]) {
     }
 
     {
-        std::cout << "\n***** Standard Allocator Using std::make_shared Test ******\n";
+        std::cout << "\n***** Standard Allocator Using std::allocator Test ******\n";
         SystemAllocatorTest test(threadCount, maxCapacity, minCapacity);
         test.start();
         test.printStatistics();
     }
 
     {
-        std::cout << "\n***** Object Pool Test with all allocations and deallocations happened within the same thread ******\n";
+        std::cout << "\n***** ObjectPoolImpl Test with all allocations and deallocations happened within the same thread ******\n";
         AllocationAndDeallocationInSameThreadsTest test(threadCount, maxCapacity, minCapacity);
         test.start();
         test.printStatistics();
@@ -329,7 +387,7 @@ int main (int argc, char *argv[]) {
     }
 
     {
-        std::cout << "\n***** Object Pool Test with all allocations and deallocations happened in the different threads ******\n";
+        std::cout << "\n***** ObjectPoolImpl Test with all allocations and deallocations happened in the different threads ******\n";
         AllocationAndDeallocationInDifferentThreadsTest test(threadCount, maxCapacity, minCapacity);
         test.start();
         test.printStatistics();

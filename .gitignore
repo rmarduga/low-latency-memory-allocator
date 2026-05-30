@@ -43,3 +43,7 @@ texinfo.tex
 /config.log
 /config.status
 /libtool
+
+# Test Dockerfiles
+Dockerfile.test
+Dockerfile
